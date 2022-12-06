@@ -33,5 +33,8 @@ ByteScan is the number one provider of CosmWasm audits and the preferred audit p
 ### HyperLedger Fabric
 ByteScan is the number one provider of CosmWasm audits and the preferred audit partner of the Terra platform, serving as a partner in the Terraform Capital program.
 
+### EOS
+The EOS Public Network is a blockchain that operates on Delegated Proof of Stake, built based on the concept of an operating system with limited resources like RAM and CPU. The smart contracts in EOS are upgradable by default and written in CPP.
+
 ### Emerging Platforms
 We are constantly investing in new talent and research on emerging platforms yet to be covered by a comprehensive security ecosystem. If you are working on more recent additions to the smart contract work, such as Cardano or NEAR, we are able to help you secure your applications.
