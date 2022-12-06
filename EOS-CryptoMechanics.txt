@@ -1,0 +1,275 @@
+
+
+# Final Report Dec 6, 2022 , sentnl.io
+# Auditor: Mohammadreza (Mo) Ashouri, bytescan.net, ashourics@protonmail.com
+
+This report comprises the finding of the security audit on the CryptoMechanics EOS smart contracts limited to the following repositories:
+
+
+https://github.com/CryptoMechanics/eosio-ibc-bridge-contract [ proof validation ]
+ef583cb25568e218473c92556eb57abcea6f7c91
+
+https://github.com/CryptoMechanics/wraplock [ lock token ]
+fb8e86c8a917952576a9b00ccbc31cd481c3b76c
+
+https://github.com/CryptoMechanics/wraptoken [ burning tokens on the destination chain ]
+f0b673d34cf293fdfa09c2fcaabf9922763c4d01
+
+-------------------------------------------------------------------------------
+# Code statistics
+
+-------------------------------------------------------------------------------
+Language                     files          blank        comment           code
+-------------------------------------------------------------------------------
+JSON                            15              1              0          17019
+C++                              4            790            311           1705
+C/C++ Header                     5            449            242            710
+C                                1            134             61            633
+Bourne Shell                    24             42             19            233
+CMake                           10             53              7            204
+Markdown                         2              1              0              3
+-------------------------------------------------------------------------------
+SUM:                            61           1470            640          20507
+-------------------------------------------------------------------------------
+
+
+# Reviewed Attacks
+This report has focused on the three main attacking surfaces: unauthorized code execution, illegal profit, and denial of service.
+These surfaces contain the following vulnerabilities in details:
+
+[passed] Fake EOS attack
+[passed] Fake receipt attack
+[passed] Random number prediction attack
+[passed] Re-entrancy attack
+[passed] Permission-less injection attack
+[passed] Inline reflex attack
+[passed] eosio.code permission misuse attack
+[passed] Malicious rollback attack
+[passed] Blacklisted rollback attack
+[warning] Transaction congestion attack
+[warning] CPU hijack attack
+[warning] RAM hijack attack
+[passed] Integer overflow attack
+[passed] Unsafe External Dependency
+[warning] WASM Stack Size DoS
+
+-------------------------------------------------------------------------------
+
+Note that some of the evaluated vulnerabilities (e.g., blacklisted rollback attack, bad randomization, etc.) might be out of the context of the project in terms of its intention and the logical structure.
+However, the auditor analyzed the code for finding even irrevalent issues that may get introduced into the project's code through its dependencies.
+
+The contract might be vulnerable to RAM hijack attack.
+This attack means a malicious user can install code on their account which will allow them to
+ insert rows in the name of another account sending them tokens. This lets them lock up RAM by inserting
+ large amounts of garbage into rows when dapps/users send them tokens.
+The detailed explanation of the attack can be found in the introduced references [7,10] at the end of this report.
+As a solution, using 'Proxy Token' can help to mitigate the problem. You can find an example of the Proxy Token contract in the link below:
+https://github.com/EOSEssentials/EOS-Proxy-Token
+Thus, basically the proxy solution works based on sending transactions to untrusted accounts through a proxy. Since the proxy has no available RAM, the malicious contract won’t be able to lock any resources on the main project contracts.
+
+Unlimited RAM is one of the promised features for the EOS ecosystem, from the auditor's perspective this feature may lead to some kind of DoS when proofs' fields become unexpectedly large.
+More specifically considering the fact that the current size of the WASM stack is 1 MB.
+
+For instance, consider the following header string:
+
+"header": {
+           "timestamp": "2022-07-15T23:48:12.000",
+           "producer": "eoseouldotio",
+           "confirmed": 240,
+           "previous": "0176d0579bebfec17576be1b8a58d1cee6ef1560bc63bf32bba08946864a21a6",
+           "new_producers": null,
+           "header_extensions": [],
+           "schedule_version": 37,
+           "transaction_mroot": "0000000000000000000000000000000000000000000000000000000000000000",
+           "action_mroot": "15b672b3cc50480a92c2fd2db63dfcf3c2630e9521212cdac42ac57f9f9eaa4b"
+         },
+
+         If the malicious entity creates a manipulated header with an unexpectedly large producer name string (e.g., 2^64 chars) or an invalid timestamp, this may lead to some kind of
+          memory violation, slowness, or even DoS, particularly in WASM machines, where the stack is very limited.
+
+         Note that the size of a word in the EOS virtual machine (based on WASM) is 32 bits.
+         That means if a manipulated proof includes a malicious header that exceeds the limits, it can lead to unexpected runtime behavior on the WASM level at runtime.
+         This is a rather network-level attack, but it seems possible to execute.
+         Apart from the header, the producer can also submit a malformed proof including XSS characters  ( to challenge any web interface) or format string (it may not work in the current version) char to challenge underlying functions.
+
+
+"producer_name": "aus1genereosAAAAAAAAAA<script>alrert('sample XSS hack')</script>AAAAAAA....AAA",
+       "authority": ["block_signing_authority_v0",{
+           "threshold": 1,
+           "keys": [{
+               "key": "EOS5eouvEgAqnVAy8AWts9Y1RpdPvaJpeCJrF7p5wMreDmX6Vv18p(same fake lengthy key)",
+               "weight": 1
+             }
+           ]
+         }
+
+
+
+The audditor suggest to take conservative approach and validate the input receiving from external environment here in the first part of the associated functions.
+  (file: bridge.cpp)
+         public_key get_producer_key(producer_schedule schedule, name producer){
+
+           for (int i = 0; i <schedule.producers.size(); i++){
+
+             if (schedule.producers[i].producer_name == producer){
+               return schedule.producers[i].block_signing_key;
+             }
+
+           }
+
+
+
+
+
+           Moreover, the field producer_signatures is defined as std::vector<signature> producer_signatures, which can presumably take a significant
+           amount of space on the heap and cause some heap-related DoS. Furthermore, the type "name" (name producer) can get overloaded by lengthy strings received from the network
+           to perform network exhaustion (e.g., network bandwidth or processor exhaustion).
+           that may cause overflows and potential unexpected behavior.
+           Thus, checking the size of the inputs received from the network before any further process is suggested.
+
+
+
+           DoS by CPU consumption: A malicious entity may submit numerous fake proofs with a non-existed producer_name in order
+           to trigger the loop within the get_producer_key function and cause a sort of CPU exhaustion that can lead to a DoS attack.
+
+           https://github.com/sunfishcode/wasm-reference-manual/blob/master/WebAssembly.md
+
+
+
+- Code optimziation (wraplock.cpp line 132):
+
+           void wraplock::deposit(name from, name to, asset quantity, string memo)
+           {
+
+               print("transfer ", name{from}, " ",  name{to}, " ", quantity, "\n");  // debugging ? you may remove it in the production version
+               print("sender: ", get_sender(), "\n"); // debugging ? you may remove it in the production version
+
+               check(global_config.exists(), "contract must be initialized first");
+               auto global = global_config.get(); // * -> the global variable is initiated
+
+               check(global.enabled == true, "contract has been disabled");
+
+               auto contractmap = _contractmappingtable.find( get_sender().value );
+               check(contractmap != _contractmappingtable.end(), "transfer not permitted from unauthorised token contract");
+
+               //if incoming transfer
+               if (from == "eosio.stake"_n) return ; //ignore unstaking transfers
+               else if (to == get_self() && from != get_self()){
+                 //ignore outbound transfers from this contract, as well as inbound transfers of tokens internal to this contract
+                 //otherwise, locks the tokens in the reserve and calls emitxfer to be used for issue/cancel proof
+
+                 check(memo.size() > 0, "memo must contain valid account name");
+
+                 check(quantity.amount > 0, "must lock positive quantity");
+
+                 add_reserve( extended_asset{quantity, get_sender()} );
+
+                 auto global = global_config.get();  // * -> why the global variable is re-initiated here?
+
+
+...
+
+
+-------------------------------------------------------------------------------
+## Result of Automatic Static Code Analysis:
+
+The result of this section has been extracted by running CPP static analysis tools, which control both security and styling issues.
+Although it does not seem the suggested affect the smart contract performance directly, it can improve the overall quality of the code
+and potentially prevent creating issues for any future development.
+
+
+src/bridge.cpp:172:3: style: Assignment of function parameter has no effect outside the function. [uselessAssignmentArg]
+  node_count++;
+  ^
+src/bridge.cpp:771:42: style: Condition '!schedule_hash_updated' is always true [knownConditionTrueFalse]
+  if (block_num>sched_itr->last_block && !schedule_hash_updated){
+                                         ^
+src/bridge.cpp:766:32: note: Assignment 'schedule_hash_updated=false', assigned value is 0
+  bool schedule_hash_updated = false;
+                               ^
+src/bridge.cpp:771:42: note: Condition '!schedule_hash_updated' is always true
+  if (block_num>sched_itr->last_block && !schedule_hash_updated){
+                                         ^
+src/bridge.cpp:123:17: style: C-style pointer casting [cstyleCast]
+  return sha256((char*)ptr, 64);
+                ^
+src/bridge.cpp:397:24: style: C-style pointer casting [cstyleCast]
+    hashes[1] = sha256((char*)ptr, rhs_size);
+                       ^
+src/bridge.cpp:415:35: style: C-style pointer casting [cstyleCast]
+  checksum256 final_hash = sha256((char*)ptr, 64);
+                                  ^
+src/bridge.cpp:925:10: style: Local variable 'sched_itr' shadows outer variable [shadowVariable]
+    auto sched_itr = _schedulestable.find(new_producer_schedule.version-1);
+         ^
+src/bridge.cpp:750:8: note: Shadowed declaration
+  auto sched_itr = _schedulestable.find(blockproof.blocktoprove.block.header.schedule_version);
+       ^
+src/bridge.cpp:925:10: note: Shadow variable
+    auto sched_itr = _schedulestable.find(new_producer_schedule.version-1);
+         ^
+src/bridge.cpp:967:14: style: Local variable 'sched_itr' shadows outer variable [shadowVariable]
+        auto sched_itr = _schedulestable.find(new_producer_schedule.version-1);
+             ^
+src/bridge.cpp:750:8: note: Shadowed declaration
+  auto sched_itr = _schedulestable.find(blockproof.blocktoprove.block.header.schedule_version);
+       ^
+src/bridge.cpp:967:14: note: Shadow variable
+        auto sched_itr = _schedulestable.find(new_producer_schedule.version-1);
+             ^
+src/bridge.cpp:236:89: performance: Function parameter 'signing_keys' should be passed by const reference. [passedByValue]
+bool auth_satisfied(const block_signing_authority_v0 authority, std::vector<public_key> signing_keys) {
+                                                                                        ^
+src/bridge.cpp:258:18: style: Consider using std::transform algorithm instead of a raw loop. [useStlAlgorithm]
+    signing_keys.push_back(recover_key(digest_to_sign, sig));
+                 ^
+src/bridge.cpp:172:13: style: Variable 'node_count' is assigned a value that is never used. [unreadVariable]
+  node_count++;
+            ^
+src/bridge.cpp:388:37: style: Variable 'data_digest' is assigned a value that is never used. [unreadVariable]
+    std::vector<uint8_t> data_digest(action_input_size);
+                                    ^
+src/bridge.cpp:389:39: style: Variable 'output_digest' is assigned a value that is never used. [unreadVariable]
+    std::vector<uint8_t> output_digest(return_value_size);
+                                      ^
+-------------------------------------------------------------------------------
+
+# General recommendation
+Utilizing Defensive Programming Practices
+
+Considering the overall condition of the source code and the identified minor issues in the code in a relatively limited time, leveraging the "defensive" programming is strongly suggested to the project team.
+Defensive programming is a defensive design intended to create software capable of detecting potential security irregularities and making predetermined responses. This pattern ensures the continuing function
+ of a piece of software under unpredictable circumstances. Defensive programming practices enhance high availability, safety, and security of a given code in the following terms:
+
+
+- General quality – reducing the number of bugs
+- Making the source code comprehensible – the source code should be readable and understandable so it is approved in a code audit. Unfortunately, the current code-based lacks proper inline comments.
+- Making the smart contracts behave predictably despite unexpected inputs or user actions. For instance, the lack of comprehensive unit testing is one of the noticed issues in the codebase at present (which is Unfortunately common among the EOS smart contracts).
+
+
+
+
+-------------------------------------------------------------------------------
+
+# References:
+1- He, N., Zhang, R., Wu, L., Wang, H., Luo, X., Guo, Y., Yu, T. and Jiang, X., 2020. Security analysis of EOSIO smart contracts. arXiv preprint arXiv:2003.06568.
+
+2- Huang, Y., Jiang, B. and Chan, W.K., 2020, November. EOSFuzzer: Fuzzing EOSIO smart contracts for vulnerability detection. In 12th Asia-Pacific Symposium on Internetware (pp. 99-109).
+
+3- Zhou, J., Jiang, T., Song, S. and Chen, T., 2022. AntFuzzer: A Grey-Box Fuzzing Framework for EOSIO Smart Contracts. arXiv preprint arXiv:2211.02652.
+
+4- Quan, L., Wu, L. and Wang, H., 2019. EVulHunter: detecting fake transfer vulnerabilities for EOSIO's smart contracts at Webassembly-level. arXiv preprint arXiv:1906.10362.
+
+5- https://developers.eos.io/manuals/eosio.cdt/v1.7/how-to-guides/authorization/how_to_restrict_access_to_an_action_by_user
+
+6- https://www.usenix.org/sites/default/files/conference/protected-files/woot19_slides_lee.pdf
+
+7- https://www.apriorit.com/dev-blog/576-eos-ram-exploit
+
+8- https://d1nn3r.github.io/2018/12/11/rollbackattack/
+
+9- https://cmichel.io/eos-vault-sx-hack/
+
+10- https://medium.com/iryo-network/eos-ram-hijack-and-its-mitigation-949edea2a3d8
+
+11- https://github.com/slowmist/eos-smart-contract-security-best-practices/blob/master/README_EN.md
